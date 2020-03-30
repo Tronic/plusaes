@@ -455,6 +455,12 @@ bool check_padding(const unsigned long padding, const unsigned char data[kStateS
     return true;
 }
 
+void gmul128(unsigned char* a, unsigned char const* b) {
+    /* TODO: GF(2^128) multiplication with P = x^128 + x^7 + x^2 + 1
+    a = a * b  mod P
+    */
+}
+
 } // namespace detail
 
 /**
@@ -754,6 +760,84 @@ inline Error crypt_ctr(
         }
         data[pos++] ^= blk[blkpos++];
     }
+
+    return kErrorOk;
+}
+
+/**
+ * Encrypts data with GCM mode.
+ * @param [in]  data Data.
+ * @param [in]  data_size Data size.
+ * @param [in]  key key bytes. The key length must be 16 (128-bit), 24 (192-bit) or 32 (256-bit).
+ * @param [in]  key_size key size.
+ * @param [in]  nonce 12 bytes.
+ * @param [in]  adata Authenticated data.
+ * @param [in]  adata_size Authenticated data size.
+ * @param [out] encrypted Encrypted data buffer.
+ * @param [in]  encrypted_size Encrypted data buffer size.
+ * @since 1.0.0+
+ */
+inline Error encrypt_gcm(
+    const unsigned char *data,
+    const unsigned long data_size,
+    const unsigned char *key,
+    const unsigned long key_size,
+    const unsigned char *nonce,
+    const unsigned long nonce_size,
+    const unsigned char *adata,
+    const unsigned long adata_size,
+    unsigned char *encrypted,
+    const unsigned long encrypted_size
+) {
+    if (nonce_size != 12)
+        return kErrorInvalidNonceSize;
+    if (!detail::is_valid_key_size(key_size))
+        return kErrorInvalidKeySize;
+    const detail::RoundKeys rkeys = detail::expand_key(key, static_cast<int>(key_size));
+
+    unsigned long blkpos = detail::kStateSize;
+    unsigned char blk[detail::kStateSize] = {};
+    unsigned char hkey[detail::kStateSize];
+    unsigned char hash[detail::kStateSize];
+    unsigned char authblk[detail::kStateSize];
+    unsigned char counter[detail::kStateSize] = {};
+    memcpy(counter, nonce, nonce_size);
+
+    // Encrypt 128 zero bits (blk) to get the hash key
+    detail::encrypt_state(rkeys, blk, hkey);
+
+    // Initial block, for xorring the final auth tag
+    detail::encrypt_state(rkeys, counter, authblk);
+    detail::incr_counter(counter);
+    // Hash authenticated data
+    unsigned long pos = 0;
+    while (pos < adata_size) {
+        for (blkpos = 0; blkpos < detail::kStateSize && pos < adata_size;) {
+            hash[blkpos++] ^= adata[pos++];
+        }
+        detail::gmul128(hash, hkey);
+    }
+    // Encrypt data and hash ciphertext
+    pos = 0;
+    while (pos < data_size) {
+        detail::encrypt_state(rkeys, counter, blk);
+        detail::incr_counter(counter);
+        for (blkpos = 0; blkpos < detail::kStateSize && pos < adata_size; ++pos) {
+            encrypted[pos] = blk[blkpos++] ^= data[pos];
+        }
+        detail::xor_data(hash, blk);
+        detail::gmul128(hash, hkey);
+    }
+
+    // Finalise hash
+    for (blkpos = 0; blkpos < detail::kStateSize; ++blkpos) {
+        pos = blkpos % 8;
+        blk[blkpos] = (pos < 8 ? adata_size : data_size) >> 7 - pos;
+    }
+    detail::xor_data(hash, blk);
+    detail::gmul128(hash, hkey);
+    detail::xor_data(hash, authblk);
+    memcpy(encrypted + pos, hash, detail::kStateSize);
 
     return kErrorOk;
 }
